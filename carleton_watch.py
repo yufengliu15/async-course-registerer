@@ -82,6 +82,7 @@ class State:
     next_check_at: float = 0.0
     last_success_at: str | None = None
     last_error: str | None = None
+    last_daily_report_at: float | None = None
 
 
 def utc_now():
@@ -371,12 +372,15 @@ def retry_delay(error: Exception, failures: int):
     return delay
 
 
+def format_observations(observations: list[Observation]):
+    return "\n".join(
+        f"{item.course.crn}  {item.course.course} {item.course.section:<3}  {STATUS_LABELS[item.status]}"
+        for item in observations
+    )
+
+
 def print_observations(observations: list[Observation]):
-    for item in observations:
-        print(
-            f"{item.course.crn}  {item.course.course} {item.course.section:<3}  {STATUS_LABELS[item.status]}",
-            flush=True,
-        )
+    print(format_observations(observations), flush=True)
 
 
 def monitor_once(settings: Settings, path: Path, send):
@@ -385,12 +389,29 @@ def monitor_once(settings: Settings, path: Path, send):
         if state.next_check_at > time.time():
             LOGGER.info("Retry backoff is active; skipped this run.")
             return 0
+        daily_due = (
+            state.last_daily_report_at is None
+            or time.time() - state.last_daily_report_at >= 24 * 60 * 60
+        )
         try:
             observations = fetch_courses(settings)
             print_observations(observations)
             alerts = new_alerts(settings, observations, state)
-            if alerts or state.failure_notified:
-                send(*alert_message(settings, alerts, state.failure_notified))
+            if alerts or state.failure_notified or daily_due:
+                if alerts or state.failure_notified:
+                    title, body = alert_message(settings, alerts, state.failure_notified)
+                else:
+                    title = "[Carleton] Daily status"
+                    body = f"The course monitor is running.\nChecked at: {utc_now()} (UTC)"
+                if daily_due:
+                    body += (
+                        "\n\nDaily run output:\n"
+                        f"{format_observations(observations)}\n"
+                        f"Checked {len(observations)} courses; {len(alerts)} new availability alerts."
+                    )
+                send(title, body)
+                if daily_due:
+                    state.last_daily_report_at = time.time()
                 LOGGER.info("ntfy accepted the notification.")
         except (MonitorError, requests.RequestException, OSError) as exc:
             state.consecutive_failures += 1
@@ -398,20 +419,26 @@ def monitor_once(settings: Settings, path: Path, send):
             state.next_check_at = time.time() + retry_delay(exc, state.consecutive_failures)
             LOGGER.error("Check failed (%s): %s", state.consecutive_failures, exc)
             if (
-                state.consecutive_failures >= settings.failure_alert_after
-                and not state.failure_notified
-                and not isinstance(exc, NotificationError)
-            ):
+                daily_due
+                or (
+                    state.consecutive_failures >= settings.failure_alert_after
+                    and not state.failure_notified
+                )
+            ) and not isinstance(exc, NotificationError):
                 try:
                     send(
-                        "[Carleton] Course monitor needs attention",
-                        f"The monitor failed {state.consecutive_failures} consecutive checks.\n"
-                        f"Last successful check: {state.last_success_at or 'none'}\n"
-                        f"Error: {state.last_error}\n\n"
+                        "[Carleton] Daily status: check failed"
+                        if daily_due
+                        else "[Carleton] Course monitor needs attention",
+                        f"Checked at: {utc_now()} (UTC)\n"
+                        f"Check failed ({state.consecutive_failures}): {state.last_error}\n"
+                        f"Last successful check: {state.last_success_at or 'none'}\n\n"
                         "Course availability is unknown. Check the server logs.\n"
                         "The monitor will retry automatically on later timer runs.\n",
                     )
                     state.failure_notified = True
+                    if daily_due:
+                        state.last_daily_report_at = time.time()
                 except (MonitorError, requests.RequestException, OSError) as notification_error:
                     state.next_check_at = max(
                         state.next_check_at,

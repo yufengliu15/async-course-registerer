@@ -116,15 +116,34 @@ def test_alerts_distinguish_waitlist_and_seat_changes(settings):
     assert watch.new_alerts(settings, [opened], state) == []
 
 
-def test_state_prevents_duplicate_alerts_after_restart(settings, tmp_path, monkeypatch):
+def test_daily_reports_and_alert_deduplication(settings, tmp_path, monkeypatch, capsys):
     path = tmp_path / "state.json"
-    monkeypatch.setattr(watch, "fetch_courses", Mock(return_value=open_courses(settings)))
+    clock = [1000.0]
+    monkeypatch.setattr(watch.time, "time", lambda: clock[0])
+    fetch = Mock(return_value=open_courses(settings))
+    monkeypatch.setattr(watch, "fetch_courses", fetch)
     send = Mock()
     assert watch.monitor_once(settings, path, send) == 0
+    assert capsys.readouterr().out.strip() in send.call_args.args[1]
+    assert watch.load_state(path).last_daily_report_at == clock[0]
     assert watch.monitor_once(settings, path, send) == 0
     send.assert_called_once()
     assert len(watch.load_state(path).statuses) == 8
     assert path.stat().st_mode & 0o777 == 0o600
+
+    clock[0] += 86400
+    assert watch.monitor_once(settings, path, send) == 0
+    assert send.call_count == 2
+    assert send.call_args.args[0] == "[Carleton] Daily status"
+    assert "Checked 8 courses; 0 new availability alerts." in send.call_args.args[1]
+
+    clock[0] += 86400
+    fetch.side_effect = watch.MonitorError("site unavailable")
+    assert watch.monitor_once(settings, path, send) == 1
+    assert send.call_count == 3
+    assert send.call_args.args[0] == "[Carleton] Daily status: check failed"
+    assert "site unavailable" in send.call_args.args[1]
+    assert watch.load_state(path).last_daily_report_at == clock[0]
 
 
 def test_ntfy_api_submission_and_rejection(ntfy):
@@ -164,6 +183,7 @@ def test_ntfy_failure_retains_status_and_respects_retry_after(
     state = watch.load_state(path)
     assert state.statuses == initial.statuses
     assert state.next_check_at == 8200.0
+    assert state.last_daily_report_at is None
     # Do not make a second notification request to report the ntfy rate limit.
     ntfy.assert_called_once()
     assert watch.monitor_once(settings, path, watch.ntfy_sender()) == 0
@@ -172,6 +192,7 @@ def test_ntfy_failure_retains_status_and_respects_retry_after(
     ntfy.return_value = http_response('{"event":"message"}')
     assert watch.monitor_once(settings, path, watch.ntfy_sender()) == 0
     assert set(watch.load_state(path).statuses.values()) == {"open"}
+    assert watch.load_state(path).last_daily_report_at == 8201.0
 
 
 def test_test_notification_does_not_contact_carleton(monkeypatch, ntfy):

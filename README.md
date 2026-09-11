@@ -115,6 +115,22 @@ A notification includes the course, section, CRN, title, status, UTC check time,
 
 Public availability does not establish your personal eligibility. The program never registers you for a course. A place can disappear between checks or before you register.
 
+### Daily status notification
+
+The monitor sends a status report on its first run, then approximately every **24 hours** through the existing five-minute timer. It includes the normal course-status output, the check time, and the number of new availability alerts.
+
+If an availability alert is due at the same time, one notification contains both. If the course check fails, the daily report contains the error instead. Retry delays can postpone a report. If the Pi or ntfy is offline, it cannot send a report.
+
+The saved state records the last daily report, so a restart does not send another one immediately. A failed notification does not advance this timestamp. The next run retries it after the retry delay.
+
+To add this feature to an existing Pi installation, update only the script:
+
+```sh
+sudo install -m 644 carleton_watch.py /opt/carleton-watch/carleton_watch.py
+```
+
+The existing timer, configuration, and state file still work. The next timer run sends the first daily report. No extra service is installed.
+
 ## systemd installation
 
 These commands are for a **first installation** on the Pi. Do not copy the example files over an existing configuration.
@@ -177,6 +193,62 @@ Retries wait 5, 10, 20, 40, then at most 60 minutes after consecutive failures. 
 After three consecutive course-check failures, the program attempts one failure notification. It reports recovery after a subsequent successful check. If ntfy itself fails, the program logs the failure rather than immediately send another notification through the failed service.
 
 State uses an atomic file replacement and a lock to prevent overlapping runs. It survives a Pi restart. A crash or timeout after ntfy accepts a notification can still cause a duplicate on retry.
+
+## Remove the installation
+
+**These commands permanently delete this monitor's installed files, configuration, credentials, and saved state.** They do not remove system Python or dependencies used by other programs.
+
+### 1. Stop the monitor
+
+```sh
+sudo systemctl disable --now carleton-watch.timer
+sudo systemctl stop carleton-watch.service
+sudo systemctl reset-failed carleton-watch.service
+```
+
+### 2. Remove the systemd units
+
+```sh
+sudo rm -f /etc/systemd/system/carleton-watch.service \
+  /etc/systemd/system/carleton-watch.timer
+sudo rm -rf /etc/systemd/system/carleton-watch.service.d \
+  /etc/systemd/system/carleton-watch.timer.d
+sudo systemctl daemon-reload
+```
+
+### 3. Remove the installed program and its data
+
+```sh
+sudo rm -rf /opt/carleton-watch /var/lib/carleton-watch
+sudo rm -f /etc/carleton-watch.toml /etc/carleton-watch.env
+```
+
+This removes the private virtual environment and all Python dependencies installed inside it.
+
+### 4. Remove the dedicated account
+
+```sh
+sudo userdel carleton-watch
+sudo groupdel carleton-watch
+```
+
+If `groupdel` says the group does not exist, `userdel` already removed it. No further action is needed.
+
+### 5. Remove an optional working copy
+
+If you also kept the project at `~/async-course-registerer`, remove that copy and any state from manual runs:
+
+```sh
+cd ~
+rm -rf -- ~/async-course-registerer
+rm -rf -- ~/.local/state/carleton-watch
+```
+
+Use your actual working-copy path if it differs. Deleting the working copy also removes its local virtual environment and environment files. Keep a copy first if you want to retain your code or settings.
+
+No ntfy server was installed on the Pi. You can unsubscribe from the topic in the iPhone app when you no longer need it.
+
+Old service logs remain in the shared system journal until its retention policy removes them. Do not delete the shared journal just to remove this monitor's logs.
 
 ## Notes
 
