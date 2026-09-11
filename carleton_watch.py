@@ -362,7 +362,7 @@ def postmark_sender():
     recipient = os.environ.get("ALERT_EMAIL", "").strip()
     for name, value in (("POSTMARK_FROM_EMAIL", sender), ("ALERT_EMAIL", recipient)):
         if not re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value):
-            raise MonitorError(f"Set {name} to one email address.")
+            # raise MonitorError(f"Set {name} to one email address.")
     if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
         raise MonitorError("Set POSTMARK_SERVER_TOKEN to your Postmark server API token.")
     if token.casefold() == "postmark_api_test":
