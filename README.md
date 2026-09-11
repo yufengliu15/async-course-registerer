@@ -1,6 +1,6 @@
 # Carleton course alerts
 
-A Python 3.11+ program for a headless Linux server. It checks public course statuses and sends Gmail alerts. It does **not** register you for courses.
+A Python 3.11+ program for a headless Linux server. It checks public course statuses and sends alerts through Postmark. It does **not** register you for courses.
 
 ## Access restriction
 
@@ -51,8 +51,8 @@ Run these commands from this directory:
 python3 -m venv .venv
 .venv/bin/python -m pip install .
 cp config.example.toml config.toml
-cp gmail.env.example gmail.env
-chmod 600 gmail.env
+cp postmark.env.example postmark.env
+chmod 600 postmark.env
 ```
 
 Alternatively, with `uv`:
@@ -61,29 +61,32 @@ Alternatively, with `uv`:
 uv sync --locked
 ```
 
-### 2. Configure Gmail
+### 2. Configure Postmark
 
-Enable Google 2-Step Verification. Create a [Gmail app password](https://support.google.com/accounts/answer/185833) if your account supports this feature. Some school, work, and Advanced Protection accounts do not support app passwords.
+No Gmail password is required. You can receive alerts in Gmail or another mailbox.
 
-Edit `gmail.env`:
+1. Create or select a **Live** server in [Postmark](https://account.postmarkapp.com/).
+2. Verify your sender address or domain under **Sender Signatures**. Use a domain that you control, not a `gmail.com` sender.
+3. Open your server's **API Tokens** tab. Copy a **Server API token**, not an Account API token.
+4. Enter the values directly in `postmark.env` on your machine or server. Do not send the token to an assistant.
 
 ```dotenv
-GMAIL_USERNAME=your-account@gmail.com
-GMAIL_APP_PASSWORD=your-16-character-app-password
-ALERT_EMAIL=your-destination@example.com
+POSTMARK_SERVER_TOKEN=your-server-api-token
+POSTMARK_FROM_EMAIL=alerts@your-domain.com
+ALERT_EMAIL=your-account@gmail.com
 ```
 
-Use the app password without spaces in this file. Do not use your normal Google password. The sender and destination can be the same account.
+The program uses the default transactional message stream, `outbound`. Postmark may require account approval before it permits delivery to arbitrary recipients. See its [sender verification guide](https://postmarkapp.com/support/article/adding-sender-signatures) and [private-domain requirement](https://postmarkapp.com/blog/why-cant-i-use-gmail-address).
 
 Load the file into your shell environment:
 
 ```sh
 set -a
-. ./gmail.env
+. ./postmark.env
 set +a
 ```
 
-Do not commit the real environment file or paste its contents into a chat. `.gitignore` excludes `gmail.env`, `.env`, and `config.toml`.
+Treat the server token as a secret. Do not commit the real environment file or paste its contents into a chat. `.gitignore` excludes `postmark.env`, `.env`, and `config.toml`. It still excludes the old `gmail.env` to protect any previous credentials.
 
 ### 3. Test email separately
 
@@ -93,7 +96,9 @@ This command sends one email. It does not contact Carleton or change monitor sta
 .venv/bin/python carleton_watch.py --test-email
 ```
 
-The server needs outbound access to `smtp.gmail.com` on TCP port **587**. The program requires STARTTLS before it sends credentials. SMTP acceptance does not guarantee inbox delivery; check the spam folder too.
+The server needs outbound HTTPS access to `api.postmarkapp.com` on TCP port **443**. No SMTP port is required. Check your inbox, spam folder, and Postmark Activity for delivery. API acceptance does not guarantee inbox delivery.
+
+Use a Live server for actual alerts. A Sandbox server does not deliver email. The program rejects the special `POSTMARK_API_TEST` token because that token only validates requests and could otherwise silently discard alerts.
 
 ### 4. Check course access
 
@@ -109,11 +114,11 @@ Run a single check without email or state writes:
 .venv/bin/python carleton_watch.py --config config.toml --dry-run
 ```
 
-This command makes real Carleton requests. It needs no Gmail credentials. It prints the current statuses, not a saved result. Compare the statuses with Carleton Central before you enable recurring checks.
+This command makes real Carleton requests. It needs no Postmark credentials. It prints the current statuses, not a saved result. Compare the statuses with Carleton Central before you enable recurring checks.
 
 ### 5. Run one normal check
 
-With the Gmail environment variables loaded:
+With the Postmark environment variables loaded:
 
 ```sh
 .venv/bin/python carleton_watch.py --config config.toml
@@ -139,7 +144,7 @@ sudo install -m 644 carleton_watch.py pyproject.toml /opt/carleton-watch/
 sudo python3 -m venv /opt/carleton-watch/.venv
 sudo /opt/carleton-watch/.venv/bin/python -m pip install /opt/carleton-watch
 sudo install -m 644 config.example.toml /etc/carleton-watch.toml
-sudo install -m 600 gmail.env.example /etc/carleton-watch.env
+sudo install -m 600 postmark.env.example /etc/carleton-watch.env
 ```
 
 ### 2. Set the configuration and credentials
@@ -149,7 +154,7 @@ sudoedit /etc/carleton-watch.toml
 sudoedit /etc/carleton-watch.env
 ```
 
-Set the three Gmail variables. Confirm permission before you change `automated_access_permitted` to `true`.
+Set `POSTMARK_SERVER_TOKEN`, `POSTMARK_FROM_EMAIL`, and `ALERT_EMAIL`. Confirm permission before you change `automated_access_permitted` to `true`.
 
 Check public access from the server before you enable the timer:
 
@@ -202,7 +207,7 @@ Stop the timer when you no longer need the courses. There is no automatic term-e
 
 The program saves state with a private file mode (`600`) and an atomic file replacement. A file lock prevents concurrent processes from using the same state file. The state survives server restarts.
 
-If an email fails, the program retains the previous course statuses so that a later check can retry the alert. SMTP and a local state file cannot guarantee exactly-once delivery: a crash after Gmail accepts an email but before the state save can cause a duplicate.
+If an email fails, the program retains the previous course statuses so that a later check can retry the alert. An email API and a local state file cannot guarantee exactly-once delivery. A crash after Postmark accepts an email but before the state save can cause a duplicate. A network timeout after Postmark accepts a request can also cause a duplicate on retry.
 
 Do not delete the state file to fix a routine error. Deletion resets alert history. If the file is corrupt, the program stops without overwriting it. Inspect the file and server logs before you reset it.
 
@@ -214,7 +219,7 @@ After a failed check, it delays retries by 5, 10, 20, 40, then at most 60 minute
 
 After **three consecutive failed checks**, it attempts one failure email. It sends a recovery email after a subsequent successful check. You can change the threshold with `failure_alert_after`.
 
-If Gmail itself is unavailable, the program cannot report that outage by email. It logs the failure and retries on later checks. Configuration errors and corrupt state files appear in the logs; they do not generate failure emails.
+If Postmark rejects an email or its API is unavailable, the program does not immediately send another request to report that failure. It logs the failure and retries on later checks. This also protects Postmark's rate limits. Configuration errors and corrupt state files appear in the logs; they do not generate failure emails.
 
 The normal check uses three HTTP requests: public term selector, search form, and a combined subject search. The program then selects the configured CRNs from the result. The five-minute interval can miss an opening that disappears between checks.
 
@@ -228,7 +233,7 @@ The normal check uses three HTTP requests: public term selector, search form, an
 
 ## Development checks
 
-The tests use mocked HTTP and SMTP. They do not contact Carleton or send email.
+The tests use mocked HTTP for both Carleton and Postmark. They do not contact either service or send email.
 
 ```sh
 uv sync --locked --extra dev
@@ -245,4 +250,4 @@ make check
 
 `make check` runs Ruff lint, pytest, the format check, and Python compilation. Use `make format` to format the Python files.
 
-The public endpoint was inspected during the initial discussion. The completed monitor has not made a live course check or sent a real Gmail message. Deployment still requires the permission check and the server-side tests above.
+The public endpoint was inspected during the initial discussion. The completed monitor has not made a live course check or sent a real Postmark message. Deployment still requires the permission check and the server-side tests above.

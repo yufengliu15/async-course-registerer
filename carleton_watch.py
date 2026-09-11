@@ -10,15 +10,12 @@ import json
 import logging
 import os
 import re
-import smtplib
-import ssl
 import tempfile
 import time
 import tomllib
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from email.message import EmailMessage
-from email.utils import format_datetime, make_msgid, parsedate_to_datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -29,6 +26,7 @@ BASE_URL = "https://central.carleton.ca/prod/"
 PUBLIC_URL = BASE_URL + "bwysched.p_select_term?wsea_code=EXT"
 CENTRAL_URL = BASE_URL + "env_util.p_central_main"
 ROBOTS_URL = "https://central.carleton.ca/robots.txt"
+POSTMARK_URL = "https://api.postmarkapp.com/email"
 LOGGER = logging.getLogger("carleton-watch")
 STATUS_LABELS = {
     "open": "Open",
@@ -50,6 +48,10 @@ class MonitorError(Exception):
 
 class AlreadyRunning(MonitorError):
     pass
+
+
+class PostmarkError(requests.HTTPError):
+    """An email failure with a safe message and optional Retry-After response."""
 
 
 @dataclass(frozen=True)
@@ -354,34 +356,62 @@ def state_lock(path: Path):
             fcntl.flock(file, fcntl.LOCK_UN)
 
 
-def gmail_sender():
-    username = os.environ.get("GMAIL_USERNAME", "").strip()
-    password = "".join(os.environ.get("GMAIL_APP_PASSWORD", "").split())
+def postmark_sender():
+    token = os.environ.get("POSTMARK_SERVER_TOKEN", "").strip()
+    sender = os.environ.get("POSTMARK_FROM_EMAIL", "").strip()
     recipient = os.environ.get("ALERT_EMAIL", "").strip()
-    for name, value in (("GMAIL_USERNAME", username), ("ALERT_EMAIL", recipient)):
+    for name, value in (("POSTMARK_FROM_EMAIL", sender), ("ALERT_EMAIL", recipient)):
         if not re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value):
             raise MonitorError(f"Set {name} to one email address.")
-    if not password:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+        raise MonitorError("Set POSTMARK_SERVER_TOKEN to your Postmark server API token.")
+    if token.casefold() == "postmark_api_test":
         raise MonitorError(
-            "Set GMAIL_APP_PASSWORD to a Gmail app password, not your normal password."
+            "POSTMARK_API_TEST does not deliver email. Use a live Postmark server token."
         )
 
     def send(subject: str, body: str):
-        message = EmailMessage()
-        message["From"] = username
-        message["To"] = recipient
-        message["Subject"] = subject
-        message["Date"] = format_datetime(datetime.now(UTC))
-        message["Message-ID"] = make_msgid()
-        message.set_content(body)
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as smtp:
-            smtp.ehlo()
-            smtp.starttls(context=ssl.create_default_context())
-            smtp.ehlo()
-            smtp.login(username, password)
-            refused = smtp.send_message(message)
-            if refused:
-                raise MonitorError("Gmail refused the alert recipient.")
+        try:
+            response = requests.post(
+                POSTMARK_URL,
+                headers={
+                    "X-Postmark-Server-Token": token,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "From": sender,
+                    "To": recipient,
+                    "Subject": subject,
+                    "TextBody": body,
+                    "MessageStream": "outbound",
+                    "TrackOpens": False,
+                    "TrackLinks": "None",
+                },
+                timeout=(10, 30),
+                # A redirect must never forward the server token to another host.
+                allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise PostmarkError(
+                "Postmark API request failed. Check connectivity and the Postmark service.",
+                response=exc.response,
+            ) from exc
+        try:
+            result = response.json()
+        except ValueError:
+            result = None
+        error_code = result.get("ErrorCode") if isinstance(result, dict) else None
+        if response.status_code != 200 or type(error_code) is not int or error_code != 0:
+            code = error_code if type(error_code) is int else "unknown"
+            # Do not log response bodies or request headers: they can contain secrets.
+            raise PostmarkError(
+                f"Postmark rejected the email (HTTP {response.status_code}, ErrorCode {code}). "
+                "Check the server token, sender verification, and Postmark Activity.",
+                response=response,
+            )
+        if not isinstance(result.get("MessageID"), str) or not result["MessageID"].strip():
+            raise PostmarkError("Postmark returned no valid MessageID.", response=response)
 
     return send
 
@@ -467,8 +497,8 @@ def monitor_once(settings: Settings, path: Path, send):
             alerts = new_alerts(settings, observations, state)
             if alerts or state.failure_notified:
                 send(*alert_message(settings, alerts, state.failure_notified))
-                LOGGER.info("Gmail accepted the notification.")
-        except (MonitorError, requests.RequestException, smtplib.SMTPException, OSError) as exc:
+                LOGGER.info("Postmark accepted the notification.")
+        except (MonitorError, requests.RequestException, OSError) as exc:
             state.consecutive_failures += 1
             state.last_error = str(exc)[:2000]
             state.next_check_at = time.time() + retry_delay(exc, state.consecutive_failures)
@@ -476,6 +506,7 @@ def monitor_once(settings: Settings, path: Path, send):
             if (
                 state.consecutive_failures >= settings.failure_alert_after
                 and not state.failure_notified
+                and not isinstance(exc, PostmarkError)
             ):
                 try:
                     send(
@@ -487,11 +518,15 @@ def monitor_once(settings: Settings, path: Path, send):
                         "The monitor will retry automatically on later timer runs.\n",
                     )
                     state.failure_notified = True
-                except (MonitorError, smtplib.SMTPException, OSError) as mail_error:
+                except (MonitorError, requests.RequestException, OSError) as mail_error:
+                    state.next_check_at = max(
+                        state.next_check_at,
+                        time.time() + retry_delay(mail_error, state.consecutive_failures),
+                    )
                     LOGGER.error("Could not send the failure notification: %s", mail_error)
             save_state(path, state)
             return 1
-        # Do not advance statuses until Gmail accepts any required notification.
+        # Do not advance statuses until Postmark accepts any required notification.
         state.statuses.update(
             {status_key(settings, item.course): item.status for item in observations}
         )
@@ -522,17 +557,17 @@ def main(argv=None):
     modes.add_argument(
         "--test-email",
         action="store_true",
-        help="Send a Gmail test; do not contact Carleton or change state.",
+        help="Send a Postmark test email; do not contact Carleton or change state.",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         if args.test_email:
-            gmail_sender()(
+            postmark_sender()(
                 "[Carleton] Test email",
-                "Your Gmail test email arrived.\nNo course check or registration took place.\n",
+                "Your Postmark test email arrived.\nNo course check or registration took place.\n",
             )
-            LOGGER.info("Gmail accepted the test email. Check your inbox and spam folder.")
+            LOGGER.info("Postmark accepted the test email. Check your inbox and Postmark Activity.")
             return 0
         settings = load_settings(args.config)
         if not settings.automated_access_permitted:
@@ -543,7 +578,7 @@ def main(argv=None):
         if args.dry_run:
             print_observations(fetch_courses(settings))
             return 0
-        return monitor_once(settings, args.state, gmail_sender())
+        return monitor_once(settings, args.state, postmark_sender())
     except AlreadyRunning as exc:
         LOGGER.info("%s", exc)
         return 0
@@ -552,7 +587,6 @@ def main(argv=None):
         OSError,
         ValueError,
         requests.RequestException,
-        smtplib.SMTPException,
     ) as exc:
         LOGGER.error("%s", exc)
         return 2

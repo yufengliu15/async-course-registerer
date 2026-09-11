@@ -1,2 +1,2 @@
-include README.md config.example.toml gmail.env.example Makefile uv.lock
+include README.md config.example.toml postmark.env.example Makefile uv.lock
 recursive-include deploy *.service *.timer
