@@ -2,10 +2,6 @@
 # Fall 2026. Winter 2027 would be "202710".
 term_code = "202630"
 
-# https://central.carleton.ca/robots.txt disallows automated crawling.
-# Confirm that this use is permitted before changing this to true.
-automated_access_permitted = false
-
 # The Linux timer controls the normal five-minute interval.
 timeout_seconds = 30
 failure_alert_after = 3

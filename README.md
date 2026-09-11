@@ -6,7 +6,7 @@ A Python 3.11+ program for a headless Linux server. It checks public course stat
 
 **Carleton's [`robots.txt`](https://central.carleton.ca/robots.txt) disallows automated crawling.** The public pages do not require login, but public access does not establish permission for automated use.
 
-The example configuration sets `automated_access_permitted = false`. The program makes no Carleton requests until you change this setting. Confirm that Carleton permits your use before you enable it. The program does not bypass login, MFA, rate limits, or other access controls.
+This is an informational notice, not a program gate. The program trusts your configuration and makes requests when you run it. It does not validate email addresses, tokens, course formats, or numeric settings locally. Postmark and the underlying libraries report actual failures.
 
 No browser, browser cookies, Carleton password, or Carleton MFA is required for the public search flow. Each check obtains a new anonymous session from the public term selector. This is an HTML interface, not a documented API.
 
@@ -98,15 +98,9 @@ This command sends one email. It does not contact Carleton or change monitor sta
 
 The server needs outbound HTTPS access to `api.postmarkapp.com` on TCP port **443**. No SMTP port is required. Check your inbox, spam folder, and Postmark Activity for delivery. API acceptance does not guarantee inbox delivery.
 
-Use a Live server for actual alerts. A Sandbox server does not deliver email. The program rejects the special `POSTMARK_API_TEST` token because that token only validates requests and could otherwise silently discard alerts.
+Use a Live server for actual alerts. Sandbox servers and the special `POSTMARK_API_TEST` token do not deliver email. The program passes your token to Postmark without a local check.
 
 ### 4. Check course access
-
-**First confirm permission for automated use.** Then set this value under `[monitor]` in `config.toml`:
-
-```toml
-automated_access_permitted = true
-```
 
 Run a single check without email or state writes:
 
@@ -154,7 +148,7 @@ sudoedit /etc/carleton-watch.toml
 sudoedit /etc/carleton-watch.env
 ```
 
-Set `POSTMARK_SERVER_TOKEN`, `POSTMARK_FROM_EMAIL`, and `ALERT_EMAIL`. Confirm permission before you change `automated_access_permitted` to `true`.
+Set `POSTMARK_SERVER_TOKEN`, `POSTMARK_FROM_EMAIL`, and `ALERT_EMAIL`.
 
 Check public access from the server before you enable the timer:
 
@@ -229,7 +223,7 @@ The normal check uses three HTTP requests: public term selector, search form, an
 | --- | --- |
 | `0` | Successful check, dry run, test email, or intentional skip due to lock or retry delay |
 | `1` | Check or notification failed; the program saved failure state |
-| `2` | Setup, access opt-in, state, or command error; inspect the log |
+| `2` | Setup, state, or command error; inspect the log |
 
 ## Development checks
 
@@ -250,4 +244,4 @@ make check
 
 `make check` runs Ruff lint, pytest, the format check, and Python compilation. Use `make format` to format the Python files.
 
-The public endpoint was inspected during the initial discussion. The completed monitor has not made a live course check or sent a real Postmark message. Deployment still requires the permission check and the server-side tests above.
+The public endpoint was inspected during the initial discussion. The completed monitor has not made a live course check or sent a real Postmark message. Use the server-side commands above to test your setup.

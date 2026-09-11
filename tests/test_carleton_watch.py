@@ -1,5 +1,4 @@
 import json
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -13,16 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def settings():
-    return replace(
-        watch.load_settings(ROOT / "config.example.toml"), automated_access_permitted=True
-    )
+    return watch.load_settings(ROOT / "config.example.toml")
 
 
 @pytest.fixture
 def postmark(monkeypatch):
     monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "example-server-token")
     monkeypatch.setenv("POSTMARK_FROM_EMAIL", "alerts@example.com")
-    monkeypatch.setenv("ALERT_EMAIL", "recipient@gmail.com")
+    monkeypatch.setenv("ALERT_EMAIL", "__@cmail.carleton.ca")
     post = Mock(
         return_value=http_response(json.dumps({"ErrorCode": 0, "MessageID": "test-message-id"}))
     )
@@ -143,7 +140,7 @@ def test_postmark_api_submission_and_rejection(postmark):
     assert args.kwargs["timeout"] == (10, 30)
     assert args.kwargs["json"] == {
         "From": "alerts@example.com",
-        "To": "recipient@gmail.com",
+        "To": "__@cmail.carleton.ca",
         "Subject": "Test",
         "TextBody": "Message body",
         "MessageStream": "outbound",
@@ -157,8 +154,7 @@ def test_postmark_api_submission_and_rejection(postmark):
         send("Test", "Message body")
     assert "example-server-token" not in str(error.value)
     postmark.return_value = http_response(json.dumps({"ErrorCode": 0}))
-    with pytest.raises(watch.PostmarkError, match="MessageID"):
-        send("Test", "Message body")
+    send("Test", "Message body")
 
 
 def test_postmark_failure_retains_status_and_respects_retry_after(
@@ -195,20 +191,22 @@ def test_test_email_does_not_contact_carleton(monkeypatch, postmark):
     postmark.assert_called_once()
     fetch.assert_not_called()
     monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "POSTMARK_API_TEST")
-    with pytest.raises(watch.MonitorError, match="does not deliver"):
-        watch.postmark_sender()
+    watch.postmark_sender()("Test", "Message body")
+    assert postmark.call_args.kwargs["headers"]["X-Postmark-Server-Token"] == "POSTMARK_API_TEST"
 
 
-def test_disabled_access_and_dry_run_do_not_send_email(settings, tmp_path, monkeypatch):
+def test_dry_run_does_not_send_email_or_write_state(settings, tmp_path, monkeypatch):
     sender = Mock(side_effect=AssertionError("must not load email credentials"))
     fetch = Mock(return_value=open_courses(settings))
     monkeypatch.setattr(watch, "postmark_sender", sender)
     monkeypatch.setattr(watch, "fetch_courses", fetch)
     path = tmp_path / "state.json"
-    assert watch.main(["--config", str(ROOT / "config.example.toml"), "--state", str(path)]) == 2
-    fetch.assert_not_called()
-    monkeypatch.setattr(watch, "load_settings", lambda _: settings)
-    assert watch.main(["--dry-run", "--state", str(path)]) == 0
+    assert (
+        watch.main(
+            ["--dry-run", "--config", str(ROOT / "config.example.toml"), "--state", str(path)]
+        )
+        == 0
+    )
     fetch.assert_called_once()
     sender.assert_not_called()
     assert not list(tmp_path.iterdir())
