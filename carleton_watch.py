@@ -24,7 +24,6 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://central.carleton.ca/prod/"
 PUBLIC_URL = BASE_URL + "bwysched.p_select_term?wsea_code=EXT"
 CENTRAL_URL = BASE_URL + "env_util.p_central_main"
-POSTMARK_URL = "https://api.postmarkapp.com/email"
 LOGGER = logging.getLogger("carleton-watch")
 STATUS_LABELS = {
     "open": "Open",
@@ -48,8 +47,8 @@ class AlreadyRunning(MonitorError):
     pass
 
 
-class PostmarkError(requests.HTTPError):
-    """An email failure with a safe message and optional Retry-After response."""
+class NotificationError(requests.HTTPError):
+    """A notification failure with an optional Retry-After response."""
 
 
 @dataclass(frozen=True)
@@ -273,51 +272,39 @@ def state_lock(path: Path):
             fcntl.flock(file, fcntl.LOCK_UN)
 
 
-def postmark_sender():
-    token = os.environ.get("POSTMARK_SERVER_TOKEN", "").strip()
-    sender = os.environ.get("POSTMARK_FROM_EMAIL", "").strip()
-    recipient = os.environ.get("ALERT_EMAIL", "").strip()
+def ntfy_sender():
+    server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+    topic = os.environ.get("NTFY_TOPIC", "")
+    token = os.environ.get("NTFY_TOKEN", "").strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
 
-    def send(subject: str, body: str):
+    def send(title: str, body: str):
         try:
             response = requests.post(
-                POSTMARK_URL,
-                headers={
-                    "X-Postmark-Server-Token": token,
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
+                f"{server}/",
+                headers=headers,
                 json={
-                    "From": sender,
-                    "To": recipient,
-                    "Subject": subject,
-                    "TextBody": body,
-                    "MessageStream": "outbound",
-                    "TrackOpens": False,
-                    "TrackLinks": "None",
+                    "topic": topic,
+                    "title": title,
+                    "message": body,
+                    "priority": 4,
+                    "click": CENTRAL_URL,
                 },
                 timeout=(10, 30),
-                # A redirect must never forward the server token to another host.
+                # Do not forward an optional access token through redirects.
                 allow_redirects=False,
             )
         except requests.RequestException as exc:
-            raise PostmarkError(
-                "Postmark API request failed. Check connectivity and the Postmark service.",
+            raise NotificationError(
+                f"ntfy request failed ({type(exc).__name__}).",
                 response=exc.response,
             ) from exc
-        try:
-            result = response.json()
-        except ValueError as exc:
-            raise PostmarkError(
-                f"Postmark returned HTTP {response.status_code} without JSON.", response=response
-            ) from exc
-        if response.status_code != 200 or result.get("ErrorCode") != 0:
-            message = result.get("Message") or response.reason or "Request failed"
+        if not 200 <= response.status_code < 300:
+            message = response.text
             if token:
                 message = message.replace(token, "[redacted]")
-            raise PostmarkError(
-                f"Postmark HTTP {response.status_code}, ErrorCode {result.get('ErrorCode')}: {message}",
-                response=response,
+            raise NotificationError(
+                f"ntfy HTTP {response.status_code}: {message}", response=response
             )
 
     return send
@@ -404,7 +391,7 @@ def monitor_once(settings: Settings, path: Path, send):
             alerts = new_alerts(settings, observations, state)
             if alerts or state.failure_notified:
                 send(*alert_message(settings, alerts, state.failure_notified))
-                LOGGER.info("Postmark accepted the notification.")
+                LOGGER.info("ntfy accepted the notification.")
         except (MonitorError, requests.RequestException, OSError) as exc:
             state.consecutive_failures += 1
             state.last_error = str(exc)[:2000]
@@ -413,7 +400,7 @@ def monitor_once(settings: Settings, path: Path, send):
             if (
                 state.consecutive_failures >= settings.failure_alert_after
                 and not state.failure_notified
-                and not isinstance(exc, PostmarkError)
+                and not isinstance(exc, NotificationError)
             ):
                 try:
                     send(
@@ -425,15 +412,15 @@ def monitor_once(settings: Settings, path: Path, send):
                         "The monitor will retry automatically on later timer runs.\n",
                     )
                     state.failure_notified = True
-                except (MonitorError, requests.RequestException, OSError) as mail_error:
+                except (MonitorError, requests.RequestException, OSError) as notification_error:
                     state.next_check_at = max(
                         state.next_check_at,
-                        time.time() + retry_delay(mail_error, state.consecutive_failures),
+                        time.time() + retry_delay(notification_error, state.consecutive_failures),
                     )
-                    LOGGER.error("Could not send the failure notification: %s", mail_error)
+                    LOGGER.error("Could not send the failure notification: %s", notification_error)
             save_state(path, state)
             return 1
-        # Do not advance statuses until Postmark accepts any required notification.
+        # Do not advance statuses until ntfy accepts any required notification.
         state.statuses.update(
             {status_key(settings, item.course): item.status for item in observations}
         )
@@ -459,28 +446,28 @@ def main(argv=None):
     modes.add_argument(
         "--dry-run",
         action="store_true",
-        help="Fetch and print statuses, without email or state writes.",
+        help="Fetch and print statuses, without notifications or state writes.",
     )
     modes.add_argument(
-        "--test-email",
+        "--test-notification",
         action="store_true",
-        help="Send a Postmark test email; do not contact Carleton or change state.",
+        help="Send an ntfy test notification; do not contact Carleton or change state.",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        if args.test_email:
-            postmark_sender()(
-                "[Carleton] Test email",
-                "Your Postmark test email arrived.\nNo course check or registration took place.\n",
+        if args.test_notification:
+            ntfy_sender()(
+                "[Carleton] Test notification",
+                "Your ntfy notification arrived.\nNo course check or registration took place.\n",
             )
-            LOGGER.info("Postmark accepted the test email. Check your inbox and Postmark Activity.")
+            LOGGER.info("ntfy accepted the test notification. Check the ntfy app on your phone.")
             return 0
         settings = load_settings(args.config)
         if args.dry_run:
             print_observations(fetch_courses(settings))
             return 0
-        return monitor_once(settings, args.state, postmark_sender())
+        return monitor_once(settings, args.state, ntfy_sender())
     except AlreadyRunning as exc:
         LOGGER.info("%s", exc)
         return 0

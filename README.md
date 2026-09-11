@@ -1,16 +1,92 @@
-# Carleton course alerts
+# Carleton course alerts via ntfy
 
-A Python 3.11+ program for a headless Linux server. It checks public course statuses and sends alerts through Postmark. It does **not** register you for courses.
+The Raspberry Pi runs the course checker. **ntfy.sh delivers push notifications to your iPhone.**
 
-## Access restriction
+```text
+Pi: Python checker → ntfy.sh → ntfy iPhone app
+```
 
-**Carleton's [`robots.txt`](https://central.carleton.ca/robots.txt) disallows automated crawling.** The public pages do not require login, but public access does not establish permission for automated use.
+No email account, sender verification, incoming port, or ntfy server installation is required. The Pi needs Python 3.11+ and outbound HTTPS access.
 
-This is an informational notice, not a program gate. The program trusts your configuration and makes requests when you run it. It does not validate email addresses, tokens, course formats, or numeric settings locally. Postmark and the underlying libraries report actual failures.
+## Quick setup
 
-No browser, browser cookies, Carleton password, or Carleton MFA is required for the public search flow. Each check obtains a new anonymous session from the public term selector. This is an HTML interface, not a documented API.
+### 1. Subscribe on your iPhone
 
-## Included course list
+Install [ntfy from the App Store](https://apps.apple.com/us/app/ntfy/id1625396347). Allow notifications. Subscribe to a topic on `https://ntfy.sh`.
+
+Choose a long, random topic name. You can generate one locally:
+
+```sh
+python3 -c "import secrets; print('carleton-' + secrets.token_hex(12))"
+```
+
+Use this same topic name in the phone app and the Pi configuration.
+
+**Public topics are not private by default.** Anyone who knows an unprotected topic name can read messages and publish to it. A random name reduces discovery but is not access control. An authenticated, access-protected topic is optional if you need privacy.
+
+### 2. Install on the Pi
+
+Use Raspberry Pi OS Bookworm or later, or another Linux distribution with Python 3.11+.
+
+Run these commands from the project directory:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+cp config.example.toml config.toml
+cp ntfy.env.example ntfy.env
+chmod 600 ntfy.env
+```
+
+If Python cannot create the virtual environment, install `python3-venv` with your package manager.
+
+### 3. Set your topic
+
+Edit `ntfy.env`:
+
+```dotenv
+NTFY_SERVER=https://ntfy.sh
+NTFY_TOPIC=your-long-random-topic
+NTFY_TOKEN=
+```
+
+Leave `NTFY_TOKEN` empty for an anonymous topic. If you use a protected topic, put its access token here and configure access in the phone app too.
+
+Load the settings into your shell:
+
+```sh
+set -a
+. ./ntfy.env
+set +a
+```
+
+The script trusts your settings. It does not add local URL, topic, or token validators. ntfy reports actual request failures.
+
+### 4. Send a test notification
+
+```sh
+.venv/bin/python carleton_watch.py --test-notification
+```
+
+This sends one notification. It does not contact Carleton or change saved course state. Confirm that it appears in the ntfy app. The service accepting a request does not guarantee that your phone displayed it.
+
+For a course check without a notification or state update:
+
+```sh
+.venv/bin/python carleton_watch.py --config config.toml --dry-run
+```
+
+For one normal check:
+
+```sh
+.venv/bin/python carleton_watch.py --config config.toml
+```
+
+### 5. Enable the Linux timer
+
+The program checks once and exits. The supplied systemd timer runs it approximately every five minutes and starts it after reboot. See the installation commands below.
+
+## Watched courses
 
 Term: **Fall 2026**, code `202630`.
 
@@ -25,110 +101,27 @@ Term: **Fall 2026**, code `202630`.
 | RELI 2110 | A | 34130 |
 | RELI 3101 | B | 34139 |
 
-Edit `config.toml` to change the list. The program verifies the term, CRN, course name, and section before it accepts a result.
+Edit `config.toml` to change the list. The checker uses Carleton's public timetable, not your browser cookies or student login.
 
-## Alert rules
+## Notification behavior
 
 - `Open`: **Seat available**.
-- `Waitlist Open`: **Waitlist available**. This is not an available seat.
-- A change from `Waitlist Open` to `Open` sends another alert.
-- An unchanged status does not send another alert. A section that closes and opens again does.
-- The first successful check also alerts you about any section that is already available.
+- `Waitlist Open`: **Waitlist available**, not an available seat.
+- A change from an open waitlist to an available seat sends another notification.
+- An unchanged status does not send another notification. A section that closes and opens again does.
+- The first check also reports sections that are already available.
 
-One email contains all new availability alerts from a check. It includes the course, section, CRN, title, status, UTC check time, and links to Carleton Central and the public timetable.
+A notification includes the course, section, CRN, title, status, UTC check time, and a registration link. Multiple new alerts from one check share one notification.
 
-Public availability does not establish your eligibility. Restrictions, prerequisites, linked sections, and registration deadlines can prevent registration. A place can disappear before you receive the email or register.
+Public availability does not establish your personal eligibility. The program never registers you for a course. A place can disappear between checks or before you register.
 
-## Local setup
+## systemd installation
 
-Use Python 3.11 or later. The program uses `requests` and `beautifulsoup4`; it needs no browser or display server.
+These commands are for a **first installation** on the Pi. Do not copy the example files over an existing configuration.
 
-### 1. Install
+### Install the program
 
-Run these commands from this directory:
-
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install .
-cp config.example.toml config.toml
-cp postmark.env.example postmark.env
-chmod 600 postmark.env
-```
-
-Alternatively, with `uv`:
-
-```sh
-uv sync --locked
-```
-
-### 2. Configure Postmark
-
-No Gmail password is required. You can receive alerts in Gmail or another mailbox.
-
-1. Create or select a **Live** server in [Postmark](https://account.postmarkapp.com/).
-2. Verify your sender address or domain under **Sender Signatures**. Use a domain that you control, not a `gmail.com` sender.
-3. Open your server's **API Tokens** tab. Copy a **Server API token**, not an Account API token.
-4. Enter the values directly in `postmark.env` on your machine or server. Do not send the token to an assistant.
-
-```dotenv
-POSTMARK_SERVER_TOKEN=your-server-api-token
-POSTMARK_FROM_EMAIL=alerts@your-domain.com
-ALERT_EMAIL=your-account@gmail.com
-```
-
-The program uses the default transactional message stream, `outbound`. Postmark may require account approval before it permits delivery to arbitrary recipients. See its [sender verification guide](https://postmarkapp.com/support/article/adding-sender-signatures) and [private-domain requirement](https://postmarkapp.com/blog/why-cant-i-use-gmail-address).
-
-Load the file into your shell environment:
-
-```sh
-set -a
-. ./postmark.env
-set +a
-```
-
-Treat the server token as a secret. Do not commit the real environment file or paste its contents into a chat. `.gitignore` excludes `postmark.env`, `.env`, and `config.toml`. It still excludes the old `gmail.env` to protect any previous credentials.
-
-### 3. Test email separately
-
-This command sends one email. It does not contact Carleton or change monitor state:
-
-```sh
-.venv/bin/python carleton_watch.py --test-email
-```
-
-The server needs outbound HTTPS access to `api.postmarkapp.com` on TCP port **443**. No SMTP port is required. Check your inbox, spam folder, and Postmark Activity for delivery. API acceptance does not guarantee inbox delivery.
-
-Use a Live server for actual alerts. Sandbox servers and the special `POSTMARK_API_TEST` token do not deliver email. The program passes your token to Postmark without a local check.
-
-### 4. Check course access
-
-Run a single check without email or state writes:
-
-```sh
-.venv/bin/python carleton_watch.py --config config.toml --dry-run
-```
-
-This command makes real Carleton requests. It needs no Postmark credentials. It prints the current statuses, not a saved result. Compare the statuses with Carleton Central before you enable recurring checks.
-
-### 5. Run one normal check
-
-With the Postmark environment variables loaded:
-
-```sh
-.venv/bin/python carleton_watch.py --config config.toml
-```
-
-The program checks once and exits. It does not run continuously. The default state file is `~/.local/state/carleton-watch/state.json`. Use `--state /path/to/state.json` to change it.
-
-## Headless Linux deployment
-
-These first-install instructions target Debian or Ubuntu with **systemd** and Python 3.11+. Ubuntu 24.04 provides a suitable Python version. Install `python3-venv` if it is absent.
-
-Do not repeat the configuration-copy commands over an existing installation: they replace the destination files. No deployment command below has run automatically.
-
-### 1. Install the program and create a service account
-
-Run these commands from the project directory on the server:
+Run from the project directory:
 
 ```sh
 sudo useradd --system --user-group --home-dir /var/lib/carleton-watch \
@@ -137,111 +130,69 @@ sudo install -d -m 755 /opt/carleton-watch
 sudo install -m 644 carleton_watch.py pyproject.toml /opt/carleton-watch/
 sudo python3 -m venv /opt/carleton-watch/.venv
 sudo /opt/carleton-watch/.venv/bin/python -m pip install /opt/carleton-watch
-sudo install -m 644 config.example.toml /etc/carleton-watch.toml
-sudo install -m 600 postmark.env.example /etc/carleton-watch.env
-```
-
-### 2. Set the configuration and credentials
-
-```sh
-sudoedit /etc/carleton-watch.toml
-sudoedit /etc/carleton-watch.env
-```
-
-Set `POSTMARK_SERVER_TOKEN`, `POSTMARK_FROM_EMAIL`, and `ALERT_EMAIL`.
-
-Check public access from the server before you enable the timer:
-
-```sh
-/opt/carleton-watch/.venv/bin/python /opt/carleton-watch/carleton_watch.py \
-  --config /etc/carleton-watch.toml --dry-run
-```
-
-### 3. Install and test the service
-
-```sh
+sudo install -m 644 config.toml /etc/carleton-watch.toml
+sudo install -m 600 ntfy.env /etc/carleton-watch.env
 sudo install -m 644 deploy/carleton-watch.service deploy/carleton-watch.timer \
   /etc/systemd/system/
-sudo systemd-analyze verify /etc/systemd/system/carleton-watch.service \
-  /etc/systemd/system/carleton-watch.timer
 sudo systemctl daemon-reload
-sudo systemctl start carleton-watch.service
-sudo journalctl -u carleton-watch.service -n 50 --no-pager
 ```
 
-The service reads the root-owned environment file, then runs as `carleton-watch`. It writes state only under `/var/lib/carleton-watch`. Its system files are read-only, and it cannot access user home directories.
-
-The first run can send availability alerts. No test email is sent automatically.
-
-### 4. Enable recurring checks
-
-After the manual service check succeeds:
+### Start the timer
 
 ```sh
+sudo systemctl start carleton-watch.service
+sudo journalctl -u carleton-watch.service -n 30 --no-pager
 sudo systemctl enable --now carleton-watch.timer
-systemctl list-timers carleton-watch.timer
 ```
 
-The timer checks approximately every **five minutes**, measured from the end of the previous check. It adds a short random delay. It also starts after a reboot. No interactive login or desktop is required.
+The service reads `/etc/carleton-watch.env`. It writes state under `/var/lib/carleton-watch` as a dedicated service user.
 
-### 5. View logs or stop the timer
+View logs or stop future checks:
 
 ```sh
 sudo journalctl -u carleton-watch.service -f
 sudo systemctl disable --now carleton-watch.timer
 ```
 
-The second command stops future checks. To stop an active check too, use `sudo systemctl stop carleton-watch.service`.
-
 Stop the timer when you no longer need the courses. There is no automatic term-end cutoff.
 
-## Reliability and limits
+### Switch an existing installation from Postmark
 
-### State and duplicate alerts
+Update the script and replace the old email variables in `/etc/carleton-watch.env` with the three ntfy variables. Keep the existing course configuration and state file.
 
-The program saves state with a private file mode (`600`) and an atomic file replacement. A file lock prevents concurrent processes from using the same state file. The state survives server restarts.
+```sh
+sudo install -m 644 carleton_watch.py /opt/carleton-watch/carleton_watch.py
+sudoedit /etc/carleton-watch.env
+sudo systemctl start carleton-watch.service
+```
 
-If an email fails, the program retains the previous course statuses so that a later check can retry the alert. An email API and a local state file cannot guarantee exactly-once delivery. A crash after Postmark accepts an email but before the state save can cause a duplicate. A network timeout after Postmark accepts a request can also cause a duplicate on retry.
+The existing timer does not need a change. The old `--test-email` command is now `--test-notification`.
 
-Do not delete the state file to fix a routine error. Deletion resets alert history. If the file is corrupt, the program stops without overwriting it. Inspect the file and server logs before you reset it.
+## Failure handling
 
-### Errors and retry delays
+The checker retains its last successful course state if a page request or notification fails. It rejects incomplete course results rather than report a false opening.
 
-A missing CRN, an unexpected course or section, an unknown status, a changed table, or a wrong term makes the **whole check fail**. The program does not treat an error or a missing row as an available seat. It retains the last successful course statuses.
+Retries wait 5, 10, 20, 40, then at most 60 minutes after consecutive failures. A longer HTTP `Retry-After` value takes priority. The timer skips requests until the retry delay ends.
 
-After a failed check, it delays retries by 5, 10, 20, 40, then at most 60 minutes. A longer HTTP `Retry-After` value takes priority. The timer still runs, but the program skips network requests until that delay ends. It does not make rapid retry requests.
+After three consecutive course-check failures, the program attempts one failure notification. It reports recovery after a subsequent successful check. If ntfy itself fails, the program logs the failure rather than immediately send another notification through the failed service.
 
-After **three consecutive failed checks**, it attempts one failure email. It sends a recovery email after a subsequent successful check. You can change the threshold with `failure_alert_after`.
+State uses an atomic file replacement and a lock to prevent overlapping runs. It survives a Pi restart. A crash or timeout after ntfy accepts a notification can still cause a duplicate on retry.
 
-If Postmark rejects an email or its API is unavailable, the program does not immediately send another request to report that failure. It logs the failure and retries on later checks. This also protects Postmark's rate limits. Configuration errors and corrupt state files appear in the logs; they do not generate failure emails.
+## Notes
 
-The normal check uses three HTTP requests: public term selector, search form, and a combined subject search. The program then selects the configured CRNs from the result. The five-minute interval can miss an opening that disappears between checks.
+Carleton's [`robots.txt`](https://central.carleton.ca/robots.txt) disallows automated crawling. This is an informational notice, not a program gate.
 
-### Exit codes
+The program does not read or use email credentials. Local `ntfy.env`, `postmark.env`, and `gmail.env` files remain excluded from Git.
 
-| Code | Meaning |
-| --- | --- |
-| `0` | Successful check, dry run, test email, or intentional skip due to lock or retry delay |
-| `1` | Check or notification failed; the program saved failure state |
-| `2` | Setup, state, or command error; inspect the log |
+The Pi only makes outbound requests. With ntfy.sh, iPhone push delivery needs no self-hosted upstream configuration. See [ntfy's documentation](https://docs.ntfy.sh/) for service details and limits.
 
-## Development checks
-
-The tests use mocked HTTP for both Carleton and Postmark. They do not contact either service or send email.
+## Development
 
 ```sh
 uv sync --locked --extra dev
 make check
 ```
 
-Without `uv`:
+Alternatively, install development dependencies with `.venv/bin/python -m pip install -e '.[dev]'`.
 
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
-make check
-```
-
-`make check` runs Ruff lint, pytest, the format check, and Python compilation. Use `make format` to format the Python files.
-
-The public endpoint was inspected during the initial discussion. The completed monitor has not made a live course check or sent a real Postmark message. Use the server-side commands above to test your setup.
+The eight core tests use mocked HTTP. They do not contact Carleton or ntfy. `make check` also runs lint, format, and compilation checks. No live notification was sent during this change.

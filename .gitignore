@@ -10,6 +10,7 @@ dist/
 .env.*
 gmail.env
 postmark.env
+ntfy.env
 config.toml
 state.json
 state.json.lock

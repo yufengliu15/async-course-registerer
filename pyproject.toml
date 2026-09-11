@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "carleton-course-watch"
 version = "0.1.0"
-description = "Email alerts for public Carleton course availability"
+description = "ntfy push notifications for public Carleton course availability"
 requires-python = ">=3.11"
 dependencies = [
   "beautifulsoup4>=4.12,<5",

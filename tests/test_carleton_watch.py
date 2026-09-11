@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -16,13 +15,11 @@ def settings():
 
 
 @pytest.fixture
-def postmark(monkeypatch):
-    monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "example-server-token")
-    monkeypatch.setenv("POSTMARK_FROM_EMAIL", "alerts@example.com")
-    monkeypatch.setenv("ALERT_EMAIL", "__@cmail.carleton.ca")
-    post = Mock(
-        return_value=http_response(json.dumps({"ErrorCode": 0, "MessageID": "test-message-id"}))
-    )
+def ntfy(monkeypatch):
+    monkeypatch.setenv("NTFY_SERVER", "https://ntfy.sh")
+    monkeypatch.setenv("NTFY_TOPIC", "test-course-topic")
+    monkeypatch.delenv("NTFY_TOKEN", raising=False)
+    post = Mock(return_value=http_response('{"event":"message"}'))
     monkeypatch.setattr(watch.requests, "post", post)
     return post
 
@@ -130,35 +127,28 @@ def test_state_prevents_duplicate_alerts_after_restart(settings, tmp_path, monke
     assert path.stat().st_mode & 0o777 == 0o600
 
 
-def test_postmark_api_submission_and_rejection(postmark):
-    send = watch.postmark_sender()
+def test_ntfy_api_submission_and_rejection(ntfy):
+    send = watch.ntfy_sender()
     send("Test", "Message body")
-    args = postmark.call_args
-    assert args.args == (watch.POSTMARK_URL,)
-    assert args.kwargs["headers"]["X-Postmark-Server-Token"] == "example-server-token"
+    args = ntfy.call_args
+    assert args.args == ("https://ntfy.sh/",)
+    assert args.kwargs["headers"] == {}
     assert args.kwargs["allow_redirects"] is False
     assert args.kwargs["timeout"] == (10, 30)
     assert args.kwargs["json"] == {
-        "From": "alerts@example.com",
-        "To": "__@cmail.carleton.ca",
-        "Subject": "Test",
-        "TextBody": "Message body",
-        "MessageStream": "outbound",
-        "TrackOpens": False,
-        "TrackLinks": "None",
+        "topic": "test-course-topic",
+        "title": "Test",
+        "message": "Message body",
+        "priority": 4,
+        "click": watch.CENTRAL_URL,
     }
-    postmark.return_value = http_response(
-        json.dumps({"ErrorCode": 400, "Message": "example-server-token"}), 422
-    )
-    with pytest.raises(watch.PostmarkError, match="ErrorCode 400") as error:
+    ntfy.return_value = http_response("topic is reserved", 403)
+    with pytest.raises(watch.NotificationError, match="topic is reserved"):
         send("Test", "Message body")
-    assert "example-server-token" not in str(error.value)
-    postmark.return_value = http_response(json.dumps({"ErrorCode": 0}))
-    send("Test", "Message body")
 
 
-def test_postmark_failure_retains_status_and_respects_retry_after(
-    settings, tmp_path, monkeypatch, postmark
+def test_ntfy_failure_retains_status_and_respects_retry_after(
+    settings, tmp_path, monkeypatch, ntfy
 ):
     path = tmp_path / "state.json"
     initial = watch.State(
@@ -168,37 +158,37 @@ def test_postmark_failure_retains_status_and_respects_retry_after(
     watch.save_state(path, initial)
     monkeypatch.setattr(watch.time, "time", lambda: 1000.0)
     monkeypatch.setattr(watch, "fetch_courses", Mock(return_value=open_courses(settings)))
-    postmark.return_value = http_response(json.dumps({"ErrorCode": 429}), 429)
-    postmark.return_value.headers["Retry-After"] = "7200"
-    assert watch.monitor_once(settings, path, watch.postmark_sender()) == 1
+    ntfy.return_value = http_response("rate limit exceeded", 429)
+    ntfy.return_value.headers["Retry-After"] = "7200"
+    assert watch.monitor_once(settings, path, watch.ntfy_sender()) == 1
     state = watch.load_state(path)
     assert state.statuses == initial.statuses
     assert state.next_check_at == 8200.0
-    # Do not make a second email request to report the Postmark rate limit.
-    postmark.assert_called_once()
-    assert watch.monitor_once(settings, path, watch.postmark_sender()) == 0
-    postmark.assert_called_once()
+    # Do not make a second notification request to report the ntfy rate limit.
+    ntfy.assert_called_once()
+    assert watch.monitor_once(settings, path, watch.ntfy_sender()) == 0
+    ntfy.assert_called_once()
     monkeypatch.setattr(watch.time, "time", lambda: 8201.0)
-    postmark.return_value = http_response(json.dumps({"ErrorCode": 0, "MessageID": "retry-id"}))
-    assert watch.monitor_once(settings, path, watch.postmark_sender()) == 0
+    ntfy.return_value = http_response('{"event":"message"}')
+    assert watch.monitor_once(settings, path, watch.ntfy_sender()) == 0
     assert set(watch.load_state(path).statuses.values()) == {"open"}
 
 
-def test_test_email_does_not_contact_carleton(monkeypatch, postmark):
+def test_test_notification_does_not_contact_carleton(monkeypatch, ntfy):
     fetch = Mock(side_effect=AssertionError("must not contact Carleton"))
     monkeypatch.setattr(watch, "fetch_courses", fetch)
-    assert watch.main(["--test-email", "--config", "/nonexistent/config.toml"]) == 0
-    postmark.assert_called_once()
+    assert watch.main(["--test-notification", "--config", "/nonexistent/config.toml"]) == 0
+    ntfy.assert_called_once()
     fetch.assert_not_called()
-    monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "POSTMARK_API_TEST")
-    watch.postmark_sender()("Test", "Message body")
-    assert postmark.call_args.kwargs["headers"]["X-Postmark-Server-Token"] == "POSTMARK_API_TEST"
+    monkeypatch.setenv("NTFY_TOKEN", "example-access-token")
+    watch.ntfy_sender()("Test", "Message body")
+    assert ntfy.call_args.kwargs["headers"]["Authorization"] == "Bearer example-access-token"
 
 
-def test_dry_run_does_not_send_email_or_write_state(settings, tmp_path, monkeypatch):
-    sender = Mock(side_effect=AssertionError("must not load email credentials"))
+def test_dry_run_does_not_send_notifications_or_write_state(settings, tmp_path, monkeypatch):
+    sender = Mock(side_effect=AssertionError("must not load notification settings"))
     fetch = Mock(return_value=open_courses(settings))
-    monkeypatch.setattr(watch, "postmark_sender", sender)
+    monkeypatch.setattr(watch, "ntfy_sender", sender)
     monkeypatch.setattr(watch, "fetch_courses", fetch)
     path = tmp_path / "state.json"
     assert (
