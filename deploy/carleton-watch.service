@@ -1,0 +1,23 @@
+[Unit]
+Description=Check public Carleton course availability
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=carleton-watch
+Group=carleton-watch
+WorkingDirectory=/opt/carleton-watch
+EnvironmentFile=/etc/carleton-watch.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/carleton-watch/.venv/bin/python /opt/carleton-watch/carleton_watch.py --config /etc/carleton-watch.toml --state /var/lib/carleton-watch/state.json
+StateDirectory=carleton-watch
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=180
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

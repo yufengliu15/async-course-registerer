@@ -1,0 +1,51 @@
+[monitor]
+# Fall 2026. Winter 2027 would be "202710".
+term_code = "202630"
+
+# https://central.carleton.ca/robots.txt disallows automated crawling.
+# Confirm that this use is permitted before changing this to true.
+automated_access_permitted = false
+
+# The Linux timer controls the normal five-minute interval.
+timeout_seconds = 30
+failure_alert_after = 3
+
+[[courses]]
+course = "HIST 2003"
+section = "A"
+crn = "32301"
+
+[[courses]]
+course = "HIST 2401"
+section = "A"
+crn = "32309"
+
+[[courses]]
+course = "HIST 2710"
+section = "A"
+crn = "32315"
+
+[[courses]]
+course = "HIST 3909"
+section = "A"
+crn = "32338"
+
+[[courses]]
+course = "PHIL 2301"
+section = "A"
+crn = "33780"
+
+[[courses]]
+course = "PHIL 2901"
+section = "A"
+crn = "33788"
+
+[[courses]]
+course = "RELI 2110"
+section = "A"
+crn = "34130"
+
+[[courses]]
+course = "RELI 3101"
+section = "B"
+crn = "34139"
