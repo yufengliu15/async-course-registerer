@@ -7,10 +7,24 @@ import requests
 import carleton_watch as watch
 
 ROOT = Path(__file__).resolve().parents[1]
+SAMPLE_COURSES = {
+    course.crn: course
+    for course in (
+        watch.Course("HIST 2003", "A", "32301"),
+        watch.Course("HIST 2401", "A", "32309"),
+        watch.Course("HIST 2710", "A", "32315"),
+        watch.Course("HIST 3909", "A", "32338"),
+        watch.Course("PHIL 2301", "A", "33780"),
+        watch.Course("PHIL 2901", "A", "33788"),
+        watch.Course("RELI 2110", "A", "34130"),
+        watch.Course("RELI 3101", "B", "34139"),
+    )
+}
 
 
 @pytest.fixture
-def settings():
+def settings(monkeypatch):
+    monkeypatch.setenv("CRNS", ",".join(SAMPLE_COURSES))
     return watch.load_settings(ROOT / "config.example.toml")
 
 
@@ -33,23 +47,23 @@ def http_response(body, status=200):
     return response
 
 
-def result_html(settings):
+def result_html(crns):
     header = "<tr><td>Status</td><td>CRN</td><td>Subject</td><td>Section</td><td>Title</td></tr>"
     rows = "".join(
         f'<tr><td><font color="red">Full, No Waitlist</font></td><td>{course.crn}</td>'
         f"<td>{course.course}</td><td>{course.section}</td><td>Course title</td></tr>"
-        for course in settings.courses
+        for course in (SAMPLE_COURSES[crn] for crn in crns)
     )
     return f'<input name="term_code" value="202630"><table>{header}{rows}</table>'
 
 
 def open_courses(settings):
-    return [watch.Observation(course, "open", "Course title") for course in settings.courses]
+    return [watch.Observation(SAMPLE_COURSES[crn], "open", "Course title") for crn in settings.crns]
 
 
-def test_watchlist_and_parser(settings):
+def test_environment_watchlist_and_parser(settings, monkeypatch):
     assert settings.term_code == "202630"
-    assert [course.crn for course in settings.courses] == [
+    assert list(settings.crns) == [
         "32301",
         "32309",
         "32315",
@@ -59,13 +73,20 @@ def test_watchlist_and_parser(settings):
         "34130",
         "34139",
     ]
-    html = result_html(settings)
-    results = watch.parse_results(html, settings)
+    html = result_html(settings.crns)
+    results = watch.parse_results(html, settings.term_code, settings.crns)
     assert len(results) == 8
+    assert results[-1].course.course == "RELI 3101"
     assert results[-1].course.section == "B"
     assert all(item.status == "full, no waitlist" for item in results)
     with pytest.raises(watch.MonitorError, match="Missing CRNs"):
-        watch.parse_results(html.replace("32301", "99999"), settings)
+        watch.parse_results(html.replace("32301", "99999"), settings.term_code, settings.crns)
+
+    monkeypatch.setenv("CRNS", "99999, 34139")
+    updated = watch.load_settings(ROOT / "config.example.toml")
+    assert updated.crns == ("99999", "34139")
+    results = watch.parse_results(html.replace("32301", "99999"), updated.term_code, updated.crns)
+    assert [item.course.crn for item in results] == ["99999", "34139"]
 
 
 def test_public_search_uses_anonymous_forms(settings, monkeypatch):
@@ -80,28 +101,27 @@ def test_public_search_uses_anonymous_forms(settings, monkeypatch):
       <input type="submit" name="time_table" value="View Worksheet"></form>"""
     session = Mock()
     session.get.return_value = http_response(term_form)
-    session.request.side_effect = [http_response(search_form), http_response(result_html(settings))]
+    session.request.side_effect = [http_response(search_form)] + [
+        http_response(result_html((crn,))) for crn in settings.crns
+    ]
     factory = Mock()
     factory.return_value.__enter__ = Mock(return_value=session)
     factory.return_value.__exit__ = Mock(return_value=False)
     monkeypatch.setattr(watch.requests, "Session", factory)
     assert len(watch.fetch_courses(settings)) == 8
     assert session.get.call_count == 1
-    assert session.request.call_count == 2
-    payload = session.request.call_args.kwargs["data"]
+    assert session.request.call_count == 1 + len(settings.crns)
+    searches = session.request.call_args_list[1:]
+    assert [dict(call.kwargs["data"])["sel_crn"] for call in searches] == list(settings.crns)
+    payload = searches[-1].kwargs["data"]
     assert ("session_id", "123456") in payload
-    assert [value for name, value in payload if name == "sel_subj"] == [
-        "dummy",
-        "HIST",
-        "PHIL",
-        "RELI",
-    ]
+    assert [value for name, value in payload if name == "sel_subj"] == ["dummy", ""]
     assert [value for name, value in payload if name == "sel_day"] == ["dummy", "m"]
     assert not any(name == "time_table" for name, _ in payload)
 
 
 def test_alerts_distinguish_waitlist_and_seat_changes(settings):
-    course = settings.courses[0]
+    course = SAMPLE_COURSES[settings.crns[0]]
     key = watch.status_key(settings, course)
     state = watch.State()
     waiting = watch.Observation(course, "waitlist open", "Course title")
@@ -172,7 +192,7 @@ def test_ntfy_failure_retains_status_and_respects_retry_after(
     path = tmp_path / "state.json"
     initial = watch.State(
         consecutive_failures=2,
-        statuses={watch.status_key(settings, course): "closed" for course in settings.courses},
+        statuses={f"{settings.term_code}:{crn}": "closed" for crn in settings.crns},
     )
     watch.save_state(path, initial)
     monkeypatch.setattr(watch.time, "time", lambda: 1000.0)

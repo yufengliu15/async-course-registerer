@@ -40,7 +40,7 @@ chmod 600 ntfy.env
 
 If Python cannot create the virtual environment, install `python3-venv` with your package manager.
 
-### 3. Set your topic
+### 3. Set your topic and CRNs
 
 Edit `ntfy.env`:
 
@@ -48,6 +48,7 @@ Edit `ntfy.env`:
 NTFY_SERVER=https://ntfy.sh
 NTFY_TOPIC=your-long-random-topic
 NTFY_TOKEN=
+CRNS=32301,32309,32315,32338,33780,33788,34130,34139
 ```
 
 Leave `NTFY_TOKEN` empty for an anonymous topic. If you use a protected topic, put its access token here and configure access in the phone app too.
@@ -101,7 +102,19 @@ Term: **Fall 2026**, code `202630`.
 | RELI 2110 | A | 34130 |
 | RELI 3101 | B | 34139 |
 
-Edit `config.toml` to change the list. The checker uses Carleton's public timetable, not your browser cookies or student login.
+Add or remove CRNs in the environment file, not in Python or TOML:
+
+```dotenv
+CRNS=32301,32309,32315,32338,33780,33788,34130,34139
+```
+
+For the installed Pi service, edit `/etc/carleton-watch.env`. The next timer run reads the new list. No reinstall, restart, or `daemon-reload` is needed for later list changes.
+
+For manual runs, edit `ntfy.env` and load it into your shell again. If your file is named `.env`, source that file instead. The script reads environment variables; it does not load environment files itself.
+
+The checker searches each CRN and gets its course name, section, title, and status from Carleton's public timetable. You do not need to enter course names or sections. It does not use browser cookies or your student login.
+
+`config.toml` now contains only the term and monitor settings. Old `[[courses]]` entries are ignored.
 
 ## Notification behavior
 
@@ -123,13 +136,7 @@ If an availability alert is due at the same time, one notification contains both
 
 The saved state records the last daily report, so a restart does not send another one immediately. A failed notification does not advance this timestamp. The next run retries it after the retry delay.
 
-To add this feature to an existing Pi installation, update only the script:
-
-```sh
-sudo install -m 644 carleton_watch.py /opt/carleton-watch/carleton_watch.py
-```
-
-The existing timer, configuration, and state file still work. The next timer run sends the first daily report. No extra service is installed.
+The existing timer and state file still work. The next timer run sends the first daily report if none has been sent before. No extra service is installed. For older installations, use the update instructions below.
 
 ## systemd installation
 
@@ -172,9 +179,20 @@ sudo systemctl disable --now carleton-watch.timer
 
 Stop the timer when you no longer need the courses. There is no automatic term-end cutoff.
 
+### Update an existing Pi installation
+
+Add the `CRNS` line shown above to `/etc/carleton-watch.env`, then copy the updated script:
+
+```sh
+sudoedit /etc/carleton-watch.env
+sudo install -m 644 carleton_watch.py /opt/carleton-watch/carleton_watch.py
+```
+
+Keep your existing TOML configuration, state file, and timer. There are no new dependencies. Future CRN changes only need an environment-file edit.
+
 ### Switch an existing installation from Postmark
 
-Update the script and replace the old email variables in `/etc/carleton-watch.env` with the three ntfy variables. Keep the existing course configuration and state file.
+Update the script and replace the old email variables in `/etc/carleton-watch.env` with the ntfy variables and `CRNS`. Keep the existing term configuration and state file.
 
 ```sh
 sudo install -m 644 carleton_watch.py /opt/carleton-watch/carleton_watch.py

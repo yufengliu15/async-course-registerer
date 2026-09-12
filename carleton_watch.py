@@ -61,7 +61,7 @@ class Course:
 @dataclass(frozen=True)
 class Settings:
     term_code: str
-    courses: tuple[Course, ...]
+    crns: tuple[str, ...]
     timeout_seconds: int = 30
     failure_alert_after: int = 3
 
@@ -95,7 +95,7 @@ def load_settings(path: Path):
     monitor = raw["monitor"]
     return Settings(
         term_code=monitor["term_code"],
-        courses=tuple(Course(**course) for course in raw["courses"]),
+        crns=tuple(os.environ["CRNS"].replace(",", " ").split()),
         timeout_seconds=monitor.get("timeout_seconds", 30),
         failure_alert_after=monitor.get("failure_alert_after", 3),
     )
@@ -161,12 +161,12 @@ def response_html(response):
     return response.text
 
 
-def parse_results(html: str, settings: Settings):
+def parse_results(html: str, term_code: str, crns: tuple[str, ...]):
     soup = BeautifulSoup(html, "html.parser")
     terms = {
         control.get("value") for control in soup.find_all("input", attrs={"name": "term_code"})
     }
-    if terms != {settings.term_code}:
+    if terms != {term_code}:
         raise MonitorError("The results do not confirm the configured term.")
     rows = [
         [cell.get_text(" ", strip=True) for cell in row.find_all("td", recursive=False)]
@@ -177,7 +177,7 @@ def parse_results(html: str, settings: Settings):
     if header is None:
         raise MonitorError("The course table header is missing or has changed.")
     columns = {name: header.index(name) for name in required}
-    targets = {course.crn: course for course in settings.courses}
+    targets = set(crns)
     found = {}
     for cells in rows:
         if len(cells) != len(header):
@@ -187,20 +187,19 @@ def parse_results(html: str, settings: Settings):
             continue
         if crn in found:
             raise MonitorError(f"Duplicate result for CRN {crn}.")
-        target = targets[crn]
-        subject = " ".join(cells[columns["Subject"]].split())
-        if subject != target.course or cells[columns["Section"]] != target.section:
-            raise MonitorError(
-                f"CRN {crn} does not match {target.course} section {target.section}."
-            )
+        course = Course(
+            course=" ".join(cells[columns["Subject"]].split()),
+            section=cells[columns["Section"]],
+            crn=crn,
+        )
         status = " ".join(cells[columns["Status"]].split()).casefold()
         if status not in STATUS_LABELS:
             raise MonitorError(f"Unknown status for CRN {crn}: {status!r}.")
-        found[crn] = Observation(target, status, cells[columns["Title"]])
-    missing = targets.keys() - found.keys()
+        found[crn] = Observation(course, status, cells[columns["Title"]])
+    missing = targets - found.keys()
     if missing:
         raise MonitorError(f"Missing CRNs in search results: {', '.join(sorted(missing))}.")
-    return [found[course.crn] for course in settings.courses]
+    return [found[crn] for crn in crns]
 
 
 def fetch_courses(settings: Settings):
@@ -218,20 +217,22 @@ def fetch_courses(settings: Settings):
             settings.timeout_seconds,
         )
         form = get_form(html, "bwysched.p_course_search")
-        subjects = sorted({course.course.split()[0] for course in settings.courses})
-        html = submit_form(
-            session,
-            form,
-            "bwysched.p_course_search",
-            {
-                "sel_subj": ["dummy", *subjects],
-                "sel_special": ["dummy", "N"],
-                "sel_crn": [""],
-                "sel_number": [""],
-            },
-            settings.timeout_seconds,
-        )
-        return parse_results(html, settings)
+        observations = []
+        for crn in settings.crns:
+            html = submit_form(
+                session,
+                form,
+                "bwysched.p_course_search",
+                {
+                    "sel_subj": ["dummy", ""],
+                    "sel_special": ["dummy", "N"],
+                    "sel_crn": [crn],
+                    "sel_number": [""],
+                },
+                settings.timeout_seconds,
+            )
+            observations.extend(parse_results(html, settings.term_code, (crn,)))
+        return observations
 
 
 def load_state(path: Path):
